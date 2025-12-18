@@ -3,7 +3,7 @@ import {App, Editor, EditorPosition, EditorSuggest, EditorSuggestTriggerInfo, No
 const RE_ANCHOR_NO_DISPLAY = /!?\[\[([^\]]+#[^|\n\r\]]+)\]\]$/;
 const RE_ANCHOR_DISPLAY = /(\[\[([^\]]+#[^\n\r\]]+)\]\])$/;
 const RE_DISPLAY = /\|([^\]]+)/;
-
+const RE_NOTE_NO_DISPLAY = /!?\[\[([^\]\|\n\r#]+)\]\]$/;
 
 interface AnchorDisplaySuggestion {
 	displayText: string;
@@ -17,6 +17,7 @@ interface AnchorDisplayTextSettings {
 	sep: string;
 	suggest: boolean;
 	ignoreEmbedded: boolean;
+	autoAliasNoteLinks: boolean;
 }
 
 const DEFAULT_SETTINGS: AnchorDisplayTextSettings = {
@@ -26,6 +27,7 @@ const DEFAULT_SETTINGS: AnchorDisplayTextSettings = {
 	sep: ' ',
 	suggest: true,
 	ignoreEmbedded: true,
+	autoAliasNoteLinks: false,
 }
 
 export default class AnchorDisplayText extends Plugin {
@@ -43,7 +45,7 @@ export default class AnchorDisplayText extends Plugin {
 		// look for header link creation
 		this.registerEvent(
 			this.app.workspace.on('editor-change', (editor: Editor) => {
-				
+				try {
 				// only process when at the end of a Wikilink
 				const cursor = editor.getCursor();
 				const currentLine = editor.getLine(cursor.line);
@@ -85,6 +87,30 @@ export default class AnchorDisplayText extends Plugin {
 					if (this.settings.includeNotice) {
 						new Notice(`Updated anchor link display text.`);
 					}
+					return;
+				}
+
+				// Optionally handle non-anchor note links by adding the note name as display text
+				if (this.settings.autoAliasNoteLinks) {
+					const noteMatch = currentLine.slice(0, cursor.ch).match(RE_NOTE_NO_DISPLAY);
+					if (noteMatch) {
+						if (this.settings.ignoreEmbedded && noteMatch[0].charAt(0) === '!') return;
+						const linkTarget = noteMatch[1];
+						const segments = linkTarget.split(/[\\/]/);
+						let noteName = segments[segments.length - 1] ?? '';
+						// strip extension if present
+						noteName = noteName.replace(/\.md$/i, '');
+						if (!noteName) return;
+						const startIndex = (noteMatch.index ?? 0) + noteMatch[0].length - 2;
+						editor.replaceRange(`|${noteName}`, {line: cursor.line, ch: startIndex}, undefined, 'headerDisplayText');
+						if (this.settings.includeNotice) {
+							new Notice(`Updated note link display text.`);
+						}
+						return;
+					}
+				}
+				} catch (err) {
+					// suppress errors to avoid breaking editor-change flow
 				}
 			})
 		);
@@ -114,6 +140,7 @@ class AnchorDisplaySuggest extends EditorSuggest<AnchorDisplaySuggestion> {
 	}
 
 	onTrigger(cursor: EditorPosition, editor: Editor): EditorSuggestTriggerInfo | null {
+		try {
 		// turns off suggestions if the setting is disabled but the app hasn't been reloaded
 		if (!this.plugin.settings.suggest) return null;
 		if (this.suggestionSelected) {
@@ -136,7 +163,7 @@ class AnchorDisplaySuggest extends EditorSuggest<AnchorDisplaySuggestion> {
 		// optionally ignore embedded links
 		if (this.plugin.settings.ignoreEmbedded && slice.charAt(match.index! - 1) === '!') return null;
 
-		return {
+		const triggerInfo = {
 			start: {
 				line: cursor.line,
 				ch: match.index! + match[1].length - 2, // 2 less to keep closing brackets
@@ -147,6 +174,11 @@ class AnchorDisplaySuggest extends EditorSuggest<AnchorDisplaySuggestion> {
 			},
 			query: match[2],
 		};
+		return triggerInfo;
+		} catch (err) {
+			// suppress errors to avoid breaking suggestion flow
+			return null;
+		}
 	}
 
 	getSuggestions(context: EditorSuggestTriggerInfo): AnchorDisplaySuggestion[] {
@@ -317,6 +349,17 @@ class AnchorDisplayTextSettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.ignoreEmbedded);
 				toggle.onChange(value => {
 					this.plugin.settings.ignoreEmbedded = value;
+					this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName('Auto alias note links')
+			.setDesc('When a link has no heading and no display text, add the note name as the display text.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.autoAliasNoteLinks);
+				toggle.onChange(value => {
+					this.plugin.settings.autoAliasNoteLinks = value;
 					this.plugin.saveSettings();
 				});
 			});
